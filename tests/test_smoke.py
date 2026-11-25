@@ -56,6 +56,17 @@ def test_sample_exceed_release_seal_flow():
     )
     assert close.status_code == 200
     assert close.json()["sample_adjudicated"] is True
+    # 加药回调后复测读数回到许可帽内（COD<50），否则帽值禁封闸门仍红灯
+    import json
+
+    from db import connect as _connect
+
+    with _connect() as _conn:
+        _conn.execute(
+            "UPDATE sample_batches SET metrics=? WHERE id=?",
+            (json.dumps({"cod": 40.0, "nh3n": 3.0, "tp": 0.2}), created["id"]),
+        )
+        _conn.commit()
     release = c.post(
         "/api/releases",
         headers=h,

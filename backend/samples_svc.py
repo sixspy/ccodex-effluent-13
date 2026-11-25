@@ -11,6 +11,7 @@ from locks import release, require_lock
 from models import SampleIn
 from validators import (
     adjudicate_exceed,
+    evaluate_cap_gate,
     metric_summary,
     validate_flow_cap,
     validate_metrics_nonneg,
@@ -49,6 +50,20 @@ def list_samples(authorization: AuthHeader = None, status: str | None = None):
         for r in rows:
             d = dict(r)
             d["metrics"] = json.loads(d["metrics"] or "{}")
+            permit = conn.execute(
+                "SELECT cod_cap, nh3n_cap, tp_cap FROM discharge_permits WHERE permit_code=?",
+                (d["permit_ref"],),
+            ).fetchone()
+            if permit:
+                # 采样页：读数与许可帽同屏可见，帽值闸门结论随行
+                gate = evaluate_cap_gate(permit, d["metrics"])
+                d["permit_caps"] = {
+                    "cod": permit["cod_cap"],
+                    "nh3n": permit["nh3n_cap"],
+                    "tp": permit["tp_cap"],
+                }
+                d["cap_passed"] = gate["cap_passed"]
+                d["cap_mismatches"] = gate["mismatches"]
             items.append(d)
         return {"items": items}
 
@@ -70,6 +85,19 @@ def get_sample(sample_id: int, authorization: AuthHeader = None):
             raise HTTPException(404, "采样批次不存在")
         data = dict(row)
         data["metrics"] = json.loads(data["metrics"] or "{}")
+        permit = conn.execute(
+            "SELECT cod_cap, nh3n_cap, tp_cap FROM discharge_permits WHERE permit_code=?",
+            (data["permit_ref"],),
+        ).fetchone()
+        if permit:
+            gate = evaluate_cap_gate(permit, data["metrics"])
+            data["permit_caps"] = {
+                "cod": permit["cod_cap"],
+                "nh3n": permit["nh3n_cap"],
+                "tp": permit["tp_cap"],
+            }
+            data["cap_passed"] = gate["cap_passed"]
+            data["cap_mismatches"] = gate["mismatches"]
         holds = conn.execute(
             "SELECT * FROM exceed_holds WHERE sample_id=? ORDER BY id DESC",
             (sample_id,),

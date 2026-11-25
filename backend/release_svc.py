@@ -1,13 +1,15 @@
 """准排放裁定放行。"""
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
 from locks import release, require_lock
 from models import ReleaseIn
-from validators import validate_sample_releasable
+from validators import raise_if_cap_mismatch, validate_sample_releasable
 
 router = APIRouter(tags=["release"])
 
@@ -50,6 +52,14 @@ def create_release(body: ReleaseIn, authorization: AuthHeader = None):
             ).fetchone()
             if existing:
                 raise HTTPException(400, "已准排，勿重复")
+            # 准排页同口径帽值闸门：读数超许可帽的快照拒收，不得进准排/封批链
+            permit = conn.execute(
+                "SELECT * FROM discharge_permits WHERE permit_code=?",
+                (sample["permit_ref"],),
+            ).fetchone()
+            if not permit:
+                raise HTTPException(400, "排放许可不存在")
+            raise_if_cap_mismatch(permit, json.loads(sample["metrics"] or "{}"))
             ref = f"RL-{sample['sample_code']}"
             conn.execute(
                 """INSERT INTO discharge_releases(sample_id,outfall_id,release_ref,status,officer,released_at)

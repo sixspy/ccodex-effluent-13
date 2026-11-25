@@ -4,6 +4,8 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from metrics_math import (
+    METRIC_KEYS,
+    METRIC_LABELS,
     as_float_map,
     compare_to_caps,
     daily_flow_m3,
@@ -67,6 +69,48 @@ def validate_sample_releasable(status: str) -> None:
 def validate_sample_sealable(status: str) -> None:
     if status not in ("已裁定", "已准排"):
         raise HTTPException(400, f"当前状态不可封批：{status}")
+
+
+def permit_cap_rows(permit: dict, metrics: dict) -> list[dict]:
+    """采样读数对许可帽的逐指标比对明细（封批/对账同口径）。"""
+    caps = {
+        "cod": float(permit["cod_cap"]),
+        "nh3n": float(permit["nh3n_cap"]),
+        "tp": float(permit["tp_cap"]),
+    }
+    # 帽值禁封为硬闸门：不设容差，读数 > 帽即不符（tol=0）
+    return compare_to_caps(as_float_map(metrics), caps, tol=0.0)
+
+
+def cap_mismatch_labels(rows: list[dict]) -> list[str]:
+    return [r["metric"] for r in rows if r["over"]]
+
+
+def evaluate_cap_gate(permit: dict, metrics: dict) -> dict:
+    """帽值闸门结论：封批服务与对账服务各自调用，口径不混用。"""
+    rows = permit_cap_rows(permit, metrics)
+    mismatches = cap_mismatch_labels(rows)
+    return {
+        "cap_passed": not mismatches,
+        "mismatches": mismatches,
+        "cap_checks": rows,
+    }
+
+
+def raise_if_cap_mismatch(permit: dict, metrics: dict) -> list[dict]:
+    """甲路径：快照读数与许可帽不符 → 封批整笔回退、正式快照零增拒收。"""
+    gate = evaluate_cap_gate(permit, metrics)
+    if not gate["cap_passed"]:
+        detail = "；".join(
+            f"{r['metric']} 读数{r['measured']} > 许可帽{r['cap']}"
+            for r in gate["cap_checks"]
+            if r["over"]
+        )
+        raise HTTPException(
+            400,
+            f"帽值禁封：{permit['permit_code']} 快照读数与许可帽不符（{detail}），封批整笔回退",
+        )
+    return gate["cap_checks"]
 
 
 def metric_summary(metrics: dict) -> str:

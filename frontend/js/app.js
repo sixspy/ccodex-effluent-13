@@ -32,7 +32,9 @@ createApp({
     const exceeds = ref([]);
     const releases = ref([]);
     const seals = ref([]);
+    const sealDrafts = ref([]);
     const permits = ref([]);
+    const capPolicy = ref({ policy: "", locked: false });
     const lineageEdges = ref([]);
     const labJobs = ref([]);
     const sludgeJobs = ref([]);
@@ -98,6 +100,21 @@ createApp({
       if (!m) return "—";
       return `COD=${m.cod} 氨氮=${m.nh3n} 总磷=${m.tp}`;
     }
+    function capBadge(s) {
+      // 五页同态：帽值闸门结论统一红/绿标
+      if (s && s.cap_passed === false) return "fail";
+      if (s && s.cap_passed === true) return "pass";
+      return "muted";
+    }
+    function capText(s) {
+      if (!s || s.cap_passed === undefined || s.cap_passed === null) return "—";
+      return s.cap_passed ? "帽内" : "帽值不符";
+    }
+    function fmtCaps(s) {
+      if (!s || !s.permit_caps) return "—";
+      return `${s.permit_caps.cod} / ${s.permit_caps.nh3n} / ${s.permit_caps.tp}`;
+    }
+    async function promoteDraft(id) { await flash(() => api.promoteDraft(id)); }
 
     async function flash(fn) {
       actionErr.value = "";
@@ -134,7 +151,9 @@ createApp({
       exceeds.value = (await api.exceeds()).items;
       releases.value = (await api.releases()).items;
       seals.value = (await api.seals()).items;
+      sealDrafts.value = (await api.sealDrafts()).items;
       permits.value = (await api.permits()).items;
+      capPolicy.value = await api.capGatePolicy();
       lineageEdges.value = (await api.lineage()).items;
       labJobs.value = (await api.labJobs()).items;
       sludgeJobs.value = (await api.sludgeJobs()).items;
@@ -218,12 +237,14 @@ createApp({
 
     return {
       token, user, username, password, err, actionErr, actionOk, tab, nav,
-      dash, plants, outfalls, samples, exceeds, releases, seals, permits,
+      dash, plants, outfalls, samples, exceeds, releases, seals, sealDrafts,
+      permits, capPolicy,
       lineageEdges, labJobs, sludgeJobs, plantDetail, sampleDetail,
       reconOne, reconAllItems, proofOne, reconCode, proofCode,
       plantForm, outfallForm, sampleForm, releaseForm, sealForm, permitForm,
       lineageForm, labForm, sludgeForm, releasableSamples, sealableSamples,
-      login, logout, refresh, statusClass, sampleClass, fmtMetrics,
+      login, logout, refresh, statusClass, sampleClass, fmtMetrics, capBadge,
+      capText, fmtCaps, promoteDraft,
       loadPlant, loadSample, createPlant, createOutfall, createSample,
       closeExceed, createRelease, createSeal, createPermit, createLineage,
       loadReconcile, loadReconcileOne, loadProof, enqueueLab, enqueueSludge,

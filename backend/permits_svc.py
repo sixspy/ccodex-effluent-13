@@ -6,8 +6,15 @@ from fastapi import APIRouter, HTTPException
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
 from models import PermitIn
+from validators import evaluate_cap_gate
 
 router = APIRouter(tags=["permits"])
+
+# 帽值禁封拍板说明：封批 COD 高于许可帽即红灯拒封，口径当日锁死
+CAP_GATE_POLICY = (
+    "帽值禁封（当日锁死）：封批快照读数高于许可帽即红灯拒封，整笔回退、正式快照零增；"
+    "不符只落影子草稿，对账复核通过方可原子升正。"
+)
 
 
 @router.get("/api/permits")
@@ -42,9 +49,25 @@ def get_permit(permit_code: str, authorization: AuthHeader = None):
         items = []
         for s in samples:
             d = dict(s)
-            d["metrics"] = json.loads(d["metrics"] or "{}")
+            metrics = json.loads(d["metrics"] or "{}")
+            d["metrics"] = metrics
+            gate = evaluate_cap_gate(row, metrics)
+            d["cap_passed"] = gate["cap_passed"]
+            d["cap_mismatches"] = gate["mismatches"]
+            d["cap_checks"] = gate["cap_checks"]
             items.append(d)
-        return {"permit": dict(row), "samples": items}
+        return {
+            "permit": dict(row),
+            "samples": items,
+            "cap_gate_policy": CAP_GATE_POLICY,
+        }
+
+
+@router.get("/api/permits-policy/cap-gate")
+def cap_gate_policy(authorization: AuthHeader = None):
+    """帽值禁封拍板说明（当日锁死，五页同态只读展示）。"""
+    require_user(authorization)
+    return {"policy": CAP_GATE_POLICY, "locked": True, "as_of": now_iso()}
 
 
 @router.post("/api/permits")
@@ -75,6 +98,7 @@ def create_permit(body: PermitIn, authorization: AuthHeader = None):
                 now_iso(),
             ),
         )
-        write_audit(conn, user, "permit_create", body.permit_code, body.model_dump())
+        write_audit(conn, user, "permit_create", body.permit_code,
+                    {**body.model_dump(), "cap_gate_policy": CAP_GATE_POLICY})
         conn.commit()
         return {"id": cur.lastrowid, **body.model_dump(), "status": "有效"}

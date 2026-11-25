@@ -6,7 +6,7 @@ import json
 from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user
-from validators import validate_permit_match
+from validators import evaluate_cap_gate, validate_permit_match
 
 router = APIRouter(tags=["reconcile"])
 
@@ -64,6 +64,10 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
         ok = validate_permit_match(
             caps, metrics, float(s["flow_m3h"]), float(permit["quota_m3d"])
         )
+        # 对账齐套不得跳过帽值比对：封批/对账同口径的硬帽闸门明细随行可见
+        gate = evaluate_cap_gate(permit, metrics)
+        if not gate["cap_passed"]:
+            ok = False
         if not ok:
             all_ok = False
         details.append(
@@ -74,6 +78,9 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
                 "metrics": metrics,
                 "flow_m3h": s["flow_m3h"],
                 "matched": ok,
+                "cap_passed": gate["cap_passed"],
+                "cap_mismatches": gate["mismatches"],
+                "cap_checks": gate["cap_checks"],
             }
         )
     seal_rows = conn.execute(
@@ -82,6 +89,19 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
            WHERE s.permit_ref=?""",
         (permit_code,),
     ).fetchall()
+    # 影子快照草稿属 shadow 区，绝不计入正式封批数与齐套
+    draft_rows = conn.execute(
+        """SELECT d.id, d.status, d.cap_passed, s.sample_code
+           FROM seal_shadow_drafts d JOIN sample_batches s ON s.id=d.sample_id
+           WHERE s.permit_ref=?""",
+        (permit_code,),
+    ).fetchall()
+    void_drafts = [
+        dict(d) for d in draft_rows
+        if d["status"] == "帽值不符作废" or not d["cap_passed"]
+    ]
+    if void_drafts:
+        all_ok = False
     return {
         "permit_code": permit_code,
         "quota_m3d": permit["quota_m3d"],
@@ -89,6 +109,8 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
         "balanced": all_ok,
         "proof_ready": all_ok and len(seal_rows) >= 1,
         "seal_count": len(seal_rows),
+        "shadow_draft_count": len(draft_rows),
+        "void_draft_count": len(void_drafts),
         "samples": details,
         "seals": [dict(x) for x in seal_rows],
     }

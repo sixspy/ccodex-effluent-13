@@ -73,5 +73,21 @@
     "status": "已裁定",
     "adjudicated_at": "2026-11-19T16:00:00",
     "created_at": "2026-11-19T15:30:00"
+  },
+  {
+    "sample_code": "SM-M13",
+    "outfall_code": "OF-E1-A",
+    "permit_ref": "DP-2026-E01",
+    "metrics": {
+      "cod": 58.0,
+      "nh3n": 4.1,
+      "tp": 0.33
+    },
+    "flow_m3h": 2600,
+    "generation": 1,
+    "status": "已裁定",
+    "adjudicated_at": "2026-11-24T09:10:00",
+    "created_at": "2026-11-24T08:40:00",
+    "note": "排污寅第13槽预置夹具：COD 58 高于许可帽 50，帽值不符仍能封批复现批"
   }
 ]

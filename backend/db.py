@@ -36,6 +36,13 @@ def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    # WAL：批锁须跨连接互斥，两路会话抢同批封批时后到连接在锁上等待而非盲写。
+    # 只读库（如受限环境挂载）无法切 WAL，容错降级为默认日志，读路径不受影响。
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -138,6 +145,21 @@ CREATE TABLE IF NOT EXISTS discharge_seals(
   sealed_at TEXT NOT NULL,
   FOREIGN KEY(sample_id) REFERENCES sample_batches(id)
 );
+CREATE TABLE IF NOT EXISTS seal_shadow_drafts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sample_id INTEGER NOT NULL,
+  sample_generation INTEGER NOT NULL,
+  snapshot TEXT NOT NULL,
+  permit_code TEXT NOT NULL,
+  cap_detail TEXT NOT NULL,
+  cap_passed INTEGER NOT NULL,
+  zone TEXT NOT NULL DEFAULT 'shadow',
+  status TEXT NOT NULL,
+  promoted_seal_id INTEGER,
+  created_at TEXT NOT NULL,
+  settled_at TEXT,
+  FOREIGN KEY(sample_id) REFERENCES sample_batches(id)
+);
 CREATE TABLE IF NOT EXISTS metric_lineage(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   from_sample_id INTEGER NOT NULL,
@@ -150,7 +172,8 @@ CREATE TABLE IF NOT EXISTS metric_lineage(
 CREATE TABLE IF NOT EXISTS effluent_locks(
   lock_key TEXT PRIMARY KEY,
   holder TEXT NOT NULL,
-  acquired_at TEXT NOT NULL
+  acquired_at TEXT NOT NULL,
+  persistent INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS contention_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -442,19 +465,55 @@ def seed_lineage(conn: sqlite3.Connection) -> None:
         )
 
 
+def migrate(conn: sqlite3.Connection) -> None:
+    """幂等迁移：旧库补 effluent-13 帽值禁封所需表与列，新库为空操作。"""
+    lock_cols = {r[1] for r in conn.execute("PRAGMA table_info(effluent_locks)")}
+    if "persistent" not in lock_cols:
+        conn.execute("ALTER TABLE effluent_locks ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0")
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "seal_shadow_drafts" not in tables:
+        conn.execute(
+            """CREATE TABLE seal_shadow_drafts(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               sample_id INTEGER NOT NULL,
+               sample_generation INTEGER NOT NULL,
+               snapshot TEXT NOT NULL,
+               permit_code TEXT NOT NULL,
+               cap_detail TEXT NOT NULL,
+               cap_passed INTEGER NOT NULL,
+               zone TEXT NOT NULL DEFAULT 'shadow',
+               status TEXT NOT NULL,
+               promoted_seal_id INTEGER,
+               created_at TEXT NOT NULL,
+               settled_at TEXT,
+               FOREIGN KEY(sample_id) REFERENCES sample_batches(id)
+            )"""
+        )
+
+
 def init_db() -> None:
-    with connect() as conn:
-        conn.executescript(SCHEMA)
-        seed_users(conn)
-        seed_plants(conn)
-        seed_outfalls(conn)
-        seed_permits(conn)
-        seed_samples(conn)
-        seed_exceeds(conn)
-        seed_releases(conn)
-        seed_seals(conn)
-        seed_lineage(conn)
-        conn.commit()
+    try:
+        with connect() as conn:
+            conn.executescript(SCHEMA)
+            migrate(conn)
+            seed_users(conn)
+            seed_plants(conn)
+            seed_outfalls(conn)
+            seed_permits(conn)
+            seed_samples(conn)
+            seed_exceeds(conn)
+            seed_releases(conn)
+            seed_seals(conn)
+            seed_lineage(conn)
+            conn.commit()
+    except sqlite3.OperationalError as exc:
+        # 只读挂载（受限环境）：保留现有数据，跳过建表/迁移/播种，读路径仍可用。
+        # 可写环境（如 Docker 新卷）不会进入此分支。
+        if "readonly" not in str(exc).lower():
+            raise
+        import warnings
+
+        warnings.warn(f"数据库只读，跳过初始化与迁移：{DB_PATH}（{exc}）", RuntimeWarning)
 
 
 def dashboard_stats(conn: sqlite3.Connection) -> dict:
